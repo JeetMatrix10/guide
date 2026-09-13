@@ -18,6 +18,17 @@ Visit `http://localhost:3000`. The app creates `data/tasks.json` automatically o
 - `DELETE /api/tasks/:id` — delete a task
 - `GET /api/projects` — project summaries
 - `GET /api/stats` — dashboard counts
+- `GET /api/activity` — latest task changes
+- `GET /api/export?format=json` — download a JSON backup
+- `GET /api/export?format=csv` — download a CSV backup
+
+## Verify
+
+```powershell
+node --test
+```
+
+The test suite starts an isolated temporary server and covers the main API flows.
 
 ## GitHub
 

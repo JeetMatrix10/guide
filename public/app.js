@@ -21,7 +21,15 @@ async function load() {
   } catch (error) { showToast(error.message, true); }
 }
 
-function render() { renderHeader(); renderStats(); renderProjects(); renderTasks(); }
+function render() {
+  renderHeader();
+  renderStats();
+  renderProjects();
+  renderTasks();
+  window.dispatchEvent(new CustomEvent('guide:tasks-rendered', {
+    detail: { tasks: state.tasks, stats: state.stats }
+  }));
+}
 
 function renderHeader() {
   const now = new Date();

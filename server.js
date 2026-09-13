@@ -9,8 +9,9 @@ const { randomUUID } = require('node:crypto');
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tasks.json');
+const ACTIVITY_FILE = path.join(DATA_DIR, 'activity.json');
 const MAX_BODY_BYTES = 1024 * 64;
 const VALID_PRIORITIES = new Set(['low', 'medium', 'high']);
 const VALID_STATUSES = new Set(['active', 'completed']);
@@ -33,6 +34,51 @@ async function initializeStore() {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try { await fs.access(DATA_FILE); }
   catch { await fs.writeFile(DATA_FILE, JSON.stringify(seedTasks, null, 2)); }
+  try { await fs.access(ACTIVITY_FILE); }
+  catch { await fs.writeFile(ACTIVITY_FILE, '[]'); }
+}
+
+async function readActivity() {
+  const raw = await fs.readFile(ACTIVITY_FILE, 'utf8');
+  const entries = JSON.parse(raw);
+  return Array.isArray(entries) ? entries : [];
+}
+
+function saveActivity(entries) {
+  writeChain = writeChain.then(async () => {
+    const temporary = `${ACTIVITY_FILE}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify(entries, null, 2));
+    await fs.rename(temporary, ACTIVITY_FILE);
+  });
+  return writeChain;
+}
+
+async function recordActivity(type, task) {
+  const entries = await readActivity();
+  entries.unshift({
+    id: randomUUID(),
+    type,
+    taskId: task.id,
+    title: task.title,
+    project: task.project,
+    occurredAt: new Date().toISOString()
+  });
+  await saveActivity(entries.slice(0, 100));
+}
+
+function csvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function tasksToCsv(tasks) {
+  const headers = ['id', 'title', 'project', 'priority', 'dueDate', 'notes', 'completed', 'createdAt', 'updatedAt'];
+  const rows = tasks.map((task) => headers.map((key) => csvCell(task[key])).join(','));
+  return `${headers.join(',')}\n${rows.join('\n')}\n`;
+}
+
+function text(res, status, content, type = 'text/plain; charset=utf-8') {
+  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+  res.end(content);
 }
 
 async function readTasks() {
@@ -161,24 +207,37 @@ async function handleApi(req, res, url) {
     }));
     return json(res, 200, { projects });
   }
+  if (resource === 'activity' && req.method === 'GET') {
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 12, 1), 100);
+    return json(res, 200, { activity: (await readActivity()).slice(0, limit) });
+  }
+  if (resource === 'export' && req.method === 'GET') {
+    const tasks = await readTasks();
+    const format = url.searchParams.get('format') || 'json';
+    if (format === 'csv') return text(res, 200, tasksToCsv(tasks), 'text/csv; charset=utf-8');
+    return json(res, 200, { exportedAt: new Date().toISOString(), tasks });
+  }
   if (resource === 'stats' && req.method === 'GET') return json(res, 200, summary(await readTasks()));
   if (resource === 'tasks' && req.method === 'POST' && !id) {
     const input = cleanTask(await readBody(req));
     const task = { id: randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...input };
-    const tasks = await readTasks(); tasks.push(task); await saveTasks(tasks);
+    const tasks = await readTasks(); tasks.push(task); await saveTasks(tasks); await recordActivity('created', task);
     return json(res, 201, { task });
   }
   if (resource === 'tasks' && id && req.method === 'PATCH') {
     const updates = cleanTask(await readBody(req), true);
     const tasks = await readTasks(); const index = tasks.findIndex((task) => task.id === id);
     if (index === -1) return error(res, 404, 'Task not found.');
-    tasks[index] = { ...tasks[index], ...updates, updatedAt: new Date().toISOString() }; await saveTasks(tasks);
+    const previous = tasks[index];
+    tasks[index] = { ...previous, ...updates, updatedAt: new Date().toISOString() }; await saveTasks(tasks);
+    await recordActivity(updates.completed === true && !previous.completed ? 'completed' : 'updated', tasks[index]);
     return json(res, 200, { task: tasks[index] });
   }
   if (resource === 'tasks' && id && req.method === 'DELETE') {
     const tasks = await readTasks(); const remaining = tasks.filter((task) => task.id !== id);
     if (remaining.length === tasks.length) return error(res, 404, 'Task not found.');
-    await saveTasks(remaining); return json(res, 200, { deleted: id });
+    const deleted = tasks.find((task) => task.id === id);
+    await saveTasks(remaining); await recordActivity('deleted', deleted); return json(res, 200, { deleted: id });
   }
   error(res, 404, 'API endpoint not found.');
 }
